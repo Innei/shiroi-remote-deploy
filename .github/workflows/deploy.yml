@@ -40,7 +40,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Read HASH_FILE content
         id: read_hash
@@ -58,7 +58,7 @@ jobs:
       sha_short: ${{ steps.compare.outputs.sha_short }}
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           repository: innei-dev/yohaku
           token: ${{ secrets.GH_PAT }}
@@ -101,7 +101,7 @@ jobs:
       sha_full: ${{ needs.check.outputs.sha_full }}
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           repository: innei-dev/yohaku
           token: ${{ secrets.GH_PAT }}
@@ -315,7 +315,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           persist-credentials: false
           fetch-depth: 0
