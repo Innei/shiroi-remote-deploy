@@ -98,6 +98,7 @@ jobs:
 
     outputs:
       sha_short: ${{ needs.check.outputs.sha_short }}
+      sha_full: ${{ needs.check.outputs.sha_full }}
 
     steps:
       - uses: actions/checkout@v4
@@ -192,6 +193,120 @@ jobs:
           if [ -n "$AFTER_DEPLOY_SCRIPT" ]; then
             eval "$AFTER_DEPLOY_SCRIPT"
           fi
+
+      - name: Notify Telegram
+        if: ${{ success() }}
+        continue-on-error: true
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          SHA_SHORT: ${{ needs.build.outputs.sha_short }}
+          SHA_FULL: ${{ needs.build.outputs.sha_full }}
+          APP_REPO_SLUG: innei-dev/yohaku
+          FORCE_BUILD: ${{ github.event.inputs.force_build || '' }}
+          GITHUB_REF_NAME: ${{ github.ref_name }}
+          GITHUB_ACTOR: ${{ github.actor }}
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+          GITHUB_WORKFLOW: ${{ github.workflow }}
+          GITHUB_RUN_NUMBER: ${{ github.run_number }}
+          GITHUB_RUN_ATTEMPT: ${{ github.run_attempt }}
+          COMMIT_MSG_HEAD: ${{ github.event_name == 'push' && github.event.head_commit.message || '' }}
+        run: |
+          if [ -z "${TELEGRAM_BOT_TOKEN:-}" ]; then
+            echo "::notice::TELEGRAM_BOT_TOKEN is not set; skipping Telegram notification."
+            exit 0
+          fi
+          RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          COMMIT_URL="https://github.com/${APP_REPO_SLUG}/commit/${SHA_FULL}"
+          IMAGE_LATEST="ghcr.io/${GITHUB_REPOSITORY_OWNER}/yohaku:latest"
+          IMAGE_SHA="ghcr.io/${GITHUB_REPOSITORY_OWNER}/yohaku:${SHA_SHORT}"
+          GH_PKGS_URL="https://github.com/${GITHUB_REPOSITORY_OWNER}?tab=packages"
+          COMPLETED_AT="$(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+          export RUN_URL COMMIT_URL IMAGE_LATEST IMAGE_SHA GH_PKGS_URL COMPLETED_AT
+
+          MSG="$(python3 <<'PY'
+          import html
+          import os
+
+          def esc(s: str) -> str:
+              return html.escape(s or "", quote=False)
+
+          sha_short_disp = esc(os.environ["SHA_SHORT"])
+          sha_full_raw = os.environ["SHA_FULL"]
+          repo = esc(os.environ["GITHUB_REPOSITORY"])
+          ref = esc(os.environ["GITHUB_REF_NAME"])
+          actor = esc(os.environ["GITHUB_ACTOR"])
+          event = esc(os.environ["GITHUB_EVENT_NAME"])
+          wf = esc(os.environ["GITHUB_WORKFLOW"])
+          rn = esc(os.environ["GITHUB_RUN_NUMBER"])
+          ra = esc(os.environ["GITHUB_RUN_ATTEMPT"])
+          run_url = os.environ["RUN_URL"]
+          commit_url_href = os.environ["COMMIT_URL"]
+          gh_pkgs_href = os.environ["GH_PKGS_URL"]
+          owner_disp = esc(os.environ["GITHUB_REPOSITORY_OWNER"])
+          image_latest = esc(os.environ["IMAGE_LATEST"])
+          image_sha = esc(os.environ["IMAGE_SHA"])
+          completed = esc(os.environ["COMPLETED_AT"])
+          sha_ci = esc(os.environ["GITHUB_SHA"][:40])
+          app_slug = esc(os.environ["APP_REPO_SLUG"])
+
+          force = (os.environ.get("FORCE_BUILD") or "").strip().lower()
+
+          head_msg = (os.environ.get("COMMIT_MSG_HEAD") or "").strip()
+          head_preview = ""
+          if head_msg:
+              first = head_msg.splitlines()[0]
+              one_line = first[:220]
+              if len(first) > 220:
+                  one_line += "…"
+              head_preview = f"<b>编排仓库 HEAD 说明</b>\n{esc(one_line)}"
+
+          parts: list[str] = ["<b>🚀 yohaku 部署成功</b>"]
+          if force == "true":
+              parts.append("⚙️ <b>强制重建</b>: 是")
+
+          parts.extend(
+              [
+                  "",
+                  "<b>📦 镜像 (GHCR)</b>",
+                  f"• <code>{image_latest}</code>",
+                  f"• <code>{image_sha}</code>",
+                  f'<a href="{gh_pkgs_href}">Packages（{owner_disp}）</a>',
+                  "",
+                  "<b>📎 应用源码（构建所用提交）</b>",
+                  f"{app_slug} @ <code>{sha_short_disp}</code> · <code>{esc(sha_full_raw[:7])}</code>…",
+                  f'<a href="{commit_url_href}">打开 innei-dev/yohaku 提交</a>',
+                  "",
+                  "<b>🔧 编排仓库 / CI 上下文</b>",
+                  f"• 仓库: <code>{repo}</code>",
+                  f"• 分支 / ref: <code>{ref}</code>",
+                  f"• 触发者 · 事件: {actor} · <code>{event}</code>",
+                  f"• Workflow: {wf} · #{rn} · attempt <code>{ra}</code>",
+                  f"• 编排仓库 <code>GITHUB_SHA</code>: <code>{sha_ci}</code>",
+              ]
+          )
+
+          if head_preview:
+              parts.extend(["", head_preview])
+
+          parts.extend(
+              [
+                  "",
+                  f"<b>🕐 完成时间（UTC）</b> {completed}",
+                  "",
+                  f'<a href="{run_url}">在 GitHub Actions 打开本次运行</a>',
+              ]
+          )
+
+          print("\n".join(parts))
+          PY
+          )"
+
+          jq -n \
+            --arg text "$MSG" \
+            '{chat_id: "@order_usagi", text: $text, parse_mode: "HTML", disable_web_page_preview: true}' \
+            | curl -sS -f -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+              -H "Content-Type: application/json" \
+              -d @-
 
   store:
     name: Store artifact commit version
