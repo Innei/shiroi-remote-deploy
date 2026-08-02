@@ -23,7 +23,7 @@ concurrency:
 env:
   HASH_FILE: build_hash.remix
   REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository_owner }}/yohaku
+  IMAGE_NAME: innei/yohaku
   SOURCE_REF: refactor/remix
   ROUTE: remix
 

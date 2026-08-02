@@ -23,7 +23,7 @@ concurrency:
 env:
   HASH_FILE: build_hash.main
   REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository_owner }}/yohaku
+  IMAGE_NAME: innei/yohaku
   SOURCE_REF: main
   ROUTE: main
 
