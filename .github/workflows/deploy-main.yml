@@ -157,8 +157,8 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
             BASE_URL=${{ secrets.BASE_URL }}
-          cache-from: type=gha,scope=main
-          cache-to: type=gha,mode=max,scope=main
+          cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:buildcache-main
+          cache-to: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:buildcache-main,mode=max,image-manifest=true,oci-mediatypes=true,compression=zstd,ignore-error=true
 
   deploy:
     name: Deploy via Dokploy
