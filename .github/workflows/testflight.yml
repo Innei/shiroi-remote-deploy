@@ -1,0 +1,295 @@
+name: TestFlight (iOS)
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: 'Git ref in innei-dev/yohaku (branch, tag, or SHA)'
+        required: false
+        type: string
+        default: main
+      notes:
+        description: 'Optional EAS build message / notification notes'
+        required: false
+        type: string
+
+  repository_dispatch:
+    types: [trigger-testflight]
+
+concurrency:
+  group: testflight
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  APP_REPO_SLUG: innei-dev/yohaku
+  MOBILE_DIR: apps/mobile
+
+jobs:
+  resolve:
+    name: Resolve source
+    runs-on: ubuntu-latest
+    outputs:
+      source_ref: ${{ steps.ref.outputs.source_ref }}
+      notes: ${{ steps.ref.outputs.notes }}
+    steps:
+      - name: Resolve ref and notes
+        id: ref
+        env:
+          DISPATCH_REF: ${{ github.event.client_payload.source_ref }}
+          DISPATCH_SHA: ${{ github.event.client_payload.source_sha }}
+          DISPATCH_NOTES: ${{ github.event.client_payload.notes }}
+          INPUT_REF: ${{ github.event.inputs.source_ref }}
+          INPUT_NOTES: ${{ github.event.inputs.notes }}
+        run: |
+          if [ "${GITHUB_EVENT_NAME}" = "repository_dispatch" ]; then
+            source_ref="${DISPATCH_REF:-$DISPATCH_SHA}"
+            notes="$DISPATCH_NOTES"
+          else
+            source_ref="${INPUT_REF:-main}"
+            notes="$INPUT_NOTES"
+          fi
+          if [ -z "$source_ref" ]; then
+            echo "::error::No source ref provided."
+            exit 1
+          fi
+          {
+            echo "source_ref=$source_ref"
+            echo "notes<<EOF"
+            printf '%s\n' "$notes"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+          echo "Building $source_ref"
+
+  submit:
+    name: Build and submit
+    runs-on: ubuntu-latest
+    needs: resolve
+    timeout-minutes: 120
+    env:
+      EXPO_ASC_APP_ID: ${{ secrets.EXPO_ASC_APP_ID }}
+      EXPO_ASC_API_KEY: ${{ secrets.EXPO_ASC_API_KEY }}
+      EXPO_ASC_API_KEY_ID: ${{ secrets.EXPO_ASC_API_KEY_ID }}
+      EXPO_ASC_API_KEY_ISSUER_ID: ${{ secrets.EXPO_ASC_API_KEY_ISSUER_ID }}
+    outputs:
+      source_sha: ${{ steps.meta.outputs.source_sha }}
+      source_short: ${{ steps.meta.outputs.source_short }}
+      build_page: ${{ steps.build.outputs.build_page }}
+    steps:
+      - name: Require EXPO_TOKEN
+        env:
+          EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+        run: |
+          if [ -z "${EXPO_TOKEN:-}" ]; then
+            echo "::error::Missing secret EXPO_TOKEN on Innei/yohaku-remote-deploy."
+            exit 1
+          fi
+
+      - name: Checkout source
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ env.APP_REPO_SLUG }}
+          token: ${{ secrets.GH_PAT }}
+          ref: ${{ needs.resolve.outputs.source_ref }}
+          fetch-depth: 1
+          lfs: true
+          submodules: recursive
+
+      - name: Record commit
+        id: meta
+        run: |
+          source_sha=$(git rev-parse HEAD)
+          source_short=$(git rev-parse --short HEAD)
+          echo "source_sha=$source_sha" >> "$GITHUB_OUTPUT"
+          echo "source_short=$source_short" >> "$GITHUB_OUTPUT"
+          echo "Resolved ${{ env.APP_REPO_SLUG }}@$source_short"
+
+      - name: Require EAS project
+        working-directory: ${{ env.MOBILE_DIR }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+          app = json.loads(Path("app.json").read_text())
+          project_id = (
+              ((app.get("expo") or {}).get("extra") or {}).get("eas") or {}
+          ).get("projectId")
+          if not project_id:
+              print(
+                  "::error::apps/mobile/app.json is missing expo.extra.eas.projectId. "
+                  "Run: cd apps/mobile && npx eas-cli login && npx eas-cli init",
+                  file=sys.stderr,
+              )
+              sys.exit(1)
+          print(project_id)
+          PY
+
+      - name: Apply optional ASC App ID
+        if: env.EXPO_ASC_APP_ID != ''
+        working-directory: ${{ env.MOBILE_DIR }}
+        env:
+          EXPO_ASC_APP_ID: ${{ secrets.EXPO_ASC_APP_ID }}
+        run: |
+          tmp="$(mktemp)"
+          jq --arg id "$EXPO_ASC_APP_ID" \
+            '.submit.production.ios.ascAppId = $id' eas.json > "$tmp"
+          mv "$tmp" eas.json
+
+      - name: Materialize optional ASC API key
+        if: env.EXPO_ASC_API_KEY != ''
+        env:
+          EXPO_ASC_API_KEY: ${{ secrets.EXPO_ASC_API_KEY }}
+          EXPO_ASC_API_KEY_ID: ${{ secrets.EXPO_ASC_API_KEY_ID }}
+          EXPO_ASC_API_KEY_ISSUER_ID: ${{ secrets.EXPO_ASC_API_KEY_ISSUER_ID }}
+        run: |
+          if [ -z "${EXPO_ASC_API_KEY_ID:-}" ] || [ -z "${EXPO_ASC_API_KEY_ISSUER_ID:-}" ]; then
+            echo "::error::EXPO_ASC_API_KEY requires EXPO_ASC_API_KEY_ID and EXPO_ASC_API_KEY_ISSUER_ID."
+            exit 1
+          fi
+          key_path="${RUNNER_TEMP}/AuthKey_${EXPO_ASC_API_KEY_ID}.p8"
+          printf '%s\n' "$EXPO_ASC_API_KEY" > "$key_path"
+          chmod 600 "$key_path"
+          {
+            echo "EXPO_ASC_API_KEY_PATH=$key_path"
+            echo "EXPO_ASC_API_KEY_ID=$EXPO_ASC_API_KEY_ID"
+            echo "EXPO_ASC_API_KEY_ISSUER_ID=$EXPO_ASC_API_KEY_ISSUER_ID"
+          } >> "$GITHUB_ENV"
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v6
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+
+      - name: Setup EAS
+        uses: expo/expo-github-action@v8
+        with:
+          eas-version: latest
+          token: ${{ secrets.EXPO_TOKEN }}
+
+      - name: Build and submit to TestFlight
+        id: build
+        working-directory: ${{ env.MOBILE_DIR }}
+        env:
+          NOTES: ${{ needs.resolve.outputs.notes }}
+        run: |
+          extra=()
+          if [ -n "${NOTES:-}" ]; then
+            extra+=(--message "$NOTES")
+          fi
+          set -o pipefail
+          eas build \
+            --platform ios \
+            --profile production \
+            --non-interactive \
+            --wait \
+            --auto-submit \
+            "${extra[@]}" | tee "$RUNNER_TEMP/eas-build.log"
+          build_page="$(grep -Eo 'https://expo.dev/accounts/[^[:space:]]+/builds/[^[:space:]]+' "$RUNNER_TEMP/eas-build.log" | tail -n1 || true)"
+          echo "build_page=$build_page" >> "$GITHUB_OUTPUT"
+
+  notify:
+    name: Notify Telegram
+    runs-on: ubuntu-latest
+    needs: [resolve, submit]
+    if: ${{ always() && needs.resolve.result == 'success' }}
+    steps:
+      - name: Notify
+        continue-on-error: true
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          RES_SUBMIT: ${{ needs.submit.result }}
+          SOURCE_REF: ${{ needs.resolve.outputs.source_ref }}
+          SOURCE_SHA: ${{ needs.submit.outputs.source_sha }}
+          SOURCE_SHORT: ${{ needs.submit.outputs.source_short }}
+          NOTES: ${{ needs.resolve.outputs.notes }}
+          BUILD_PAGE: ${{ needs.submit.outputs.build_page }}
+          APP_REPO_SLUG: ${{ env.APP_REPO_SLUG }}
+          GITHUB_REF_NAME: ${{ github.ref_name }}
+          GITHUB_ACTOR: ${{ github.actor }}
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+          GITHUB_WORKFLOW: ${{ github.workflow }}
+          GITHUB_RUN_NUMBER: ${{ github.run_number }}
+        run: |
+          if [ -z "${TELEGRAM_BOT_TOKEN:-}" ]; then
+            echo "::notice::TELEGRAM_BOT_TOKEN is not set; skipping Telegram notification."
+            exit 0
+          fi
+
+          RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          COMMIT_URL=""
+          if [ -n "${SOURCE_SHA:-}" ]; then
+            COMMIT_URL="https://github.com/${APP_REPO_SLUG}/commit/${SOURCE_SHA}"
+          fi
+          COMPLETED_AT="$(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+          export RUN_URL COMMIT_URL COMPLETED_AT
+
+          MSG="$(python3 <<'PY'
+          import html
+          import os
+
+          def esc(s: str) -> str:
+              return html.escape(s or "", quote=False)
+
+          ok = os.environ.get("RES_SUBMIT") == "success"
+          title = "✅ Yohaku TestFlight 已提交" if ok else "❌ Yohaku TestFlight 失败"
+          source_ref = esc(os.environ.get("SOURCE_REF") or "")
+          source_short = esc(os.environ.get("SOURCE_SHORT") or "")
+          source_sha = os.environ.get("SOURCE_SHA") or ""
+          notes = (os.environ.get("NOTES") or "").strip()
+          build_page = os.environ.get("BUILD_PAGE") or ""
+          run_url = os.environ["RUN_URL"]
+          commit_url = os.environ.get("COMMIT_URL") or ""
+          completed = esc(os.environ["COMPLETED_AT"])
+          actor = esc(os.environ["GITHUB_ACTOR"])
+          event = esc(os.environ["GITHUB_EVENT_NAME"])
+          wf = esc(os.environ["GITHUB_WORKFLOW"])
+          rn = esc(os.environ["GITHUB_RUN_NUMBER"])
+          slug = esc(os.environ["APP_REPO_SLUG"])
+
+          parts = [
+              f"<b>{title}</b>",
+              f"<b>源</b>: <code>{slug}</code> @ <code>{source_ref}</code>",
+          ]
+          if source_short:
+              line = f"<code>{source_short}</code>"
+              if commit_url:
+                  line += f' · <a href="{commit_url}">打开提交</a>'
+              parts.append(f"<b>提交</b>: {line}")
+          elif source_sha:
+              parts.append(f"<b>提交</b>: <code>{esc(source_sha[:12])}</code>")
+
+          parts.extend(
+              [
+                  f"<b>触发</b>: {actor} · <code>{event}</code>",
+                  f"<b>Workflow</b>: {wf} · #{rn}",
+              ]
+          )
+          if notes:
+              preview = notes.splitlines()[0][:220]
+              parts.extend(["", f"<b>Notes</b>\n{esc(preview)}"])
+          if build_page:
+              parts.extend(["", f'<a href="{esc(build_page)}">打开 EAS build</a>'])
+          parts.extend(
+              [
+                  "",
+                  f"<b>🕐 {completed}</b>",
+                  f'<a href="{run_url}">打开 GitHub Actions</a>',
+              ]
+          )
+          print("\n".join(parts))
+          PY
+          )"
+
+          jq -n \
+            --arg text "$MSG" \
+            '{chat_id: "@order_usagi", text: $text, parse_mode: "HTML", disable_web_page_preview: true}' \
+            | curl -sS -f -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+              -H "Content-Type: application/json" \
+              -d @-
