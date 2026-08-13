@@ -91,13 +91,16 @@ build_hash.remix       # remix route 去重指针（CI 自动维护）
 | `BASE_URL` | Docker build-arg，站点根 URL（无尾部斜杠） |
 | `TELEGRAM_BOT_TOKEN` | （可选）Telegram 通知用 bot token |
 | `AFTER_DEPLOY_SCRIPT` | （可选）部署后执行的 shell 脚本 |
-| `EXPO_TOKEN` | TestFlight 必填。Expo access token（https://expo.dev/settings/access-tokens） |
-| `EXPO_ASC_APP_ID` | （可选）App Store Connect Apple ID（数字）。填了会写入本次 `eas.json` submit |
-| `EXPO_ASC_API_KEY` | （可选）App Store Connect API key 的 `.p8` 全文 |
-| `EXPO_ASC_API_KEY_ID` | （可选）与上一行配套的 Key ID |
-| `EXPO_ASC_API_KEY_ISSUER_ID` | （可选）与上一行配套的 Issuer ID |
+| `IOS_DIST_CERT_P12` | Apple Distribution `.p12` 的 base64 |
+| `IOS_DIST_CERT_PASSWORD` | 导出 `.p12` 时的密码 |
+| `IOS_APPSTORE_PROFILE` | Yohaku App Store `.mobileprovision` 的 base64 |
+| `ASC_KEY_ID` | App Store Connect API Key ID |
+| `ASC_ISSUER_ID` | App Store Connect API Issuer ID |
+| `ASC_API_KEY_P8` | API key 的 `.p8` 原文 |
 
 ## TestFlight
+
+不用 EAS。编排仓在 `macos-26` 上 `expo prebuild` 出 native 工程（`ios/` 不进源仓），再 `xcodebuild archive` + `exportArchive` 上传 TestFlight。
 
 ```
 yohaku 仓 Actions → Trigger Remote TestFlight
@@ -108,24 +111,26 @@ yohaku-remote-deploy  testflight.yml
        ↓
 checkout innei-dev/yohaku@source_ref（含 submodule）
        ↓
-eas build -p ios --profile production --wait --auto-submit
+prebuild → pod install → 导入 P12/profile → archive → upload
        ↓
 App Store Connect → TestFlight
 ```
 
-不跟 `build_hash.*` 去重：每次 dispatch 都打一个新 build number。同一时间只跑一条（`concurrency: testflight`，不取消进行中的提交）。
+不跟 `build_hash.*` 去重。`CURRENT_PROJECT_VERSION` 用 `GITHUB_RUN_NUMBER`，export 时打开 `manageAppVersionAndBuildNumber`。同一时间只跑一条。
 
-### 一次性准备
+### 标识
 
-1. App Store Connect 建好 App，Bundle ID 必须是 `in.innei`，Team `KAMM5N88X3`（Yuhao Jiang）。建完把数字 Apple ID 填进 `EXPO_ASC_APP_ID`（或写进源仓 `apps/mobile/eas.json` 的 `submit.production.ios.ascAppId`）。
-2. 在本机：`cd apps/mobile && npx eas-cli login && npx eas-cli init`，把 `expo.extra.eas.projectId` 写进 `app.json` 并提交。
-3. 配置签名：`npx eas-cli credentials -p ios`，选 production / App Store distribution。CI 只持有 `EXPO_TOKEN` 就能复用 Expo 上的证书和 profile。
-4. 推荐再在 App Store Connect → Users and Access → Integrations → App Store Connect API 建一把 **App Manager** key，把 `.p8` / Key ID / Issuer ID 放进上面三个 `EXPO_ASC_*` secret，避免 submit 阶段 2FA。
-5. 源仓 `innei-dev/yohaku` 已有 `.github/workflows/trigger-testflight.yml`，沿用现有 `secrets.PAT` 对编排仓发 `repository_dispatch`。
+| 项 | 值 |
+|----|----|
+| Bundle ID | `in.innei` |
+| Team | `KAMM5N88X3` |
+| Profile name | `Yohaku` |
+
+源仓 `innei-dev/yohaku` 的 `.github/workflows/trigger-testflight.yml` 用现有 `secrets.PAT` 发 `repository_dispatch`。
 
 ### 触发
 
-- 源仓：Actions → **Trigger Remote TestFlight**。`ref` 留空则构建当前 run 的 SHA；也可以填 `feat/rn` 或某个 commit。
+- 源仓：Actions → **Trigger Remote TestFlight**。`ref` 留空则构建当前 run 的 SHA。
 - 编排仓：Actions → **TestFlight (iOS)**，直接填 `source_ref`。
 
 ## yohaku 仓 notify 配置
