@@ -117,7 +117,7 @@ App Store Connect → TestFlight
 
 ### 一次性准备
 
-1. App Store Connect 建好 App，Bundle ID 必须是 `in.innei.yohaku`，Team `WL5WKKJG77`。建完把数字 Apple ID 填进 `EXPO_ASC_APP_ID`（或写进源仓 `apps/mobile/eas.json` 的 `submit.production.ios.ascAppId`）。
+1. App Store Connect 建好 App，Bundle ID 必须是 `in.innei`，Team `KAMM5N88X3`（Yuhao Jiang）。建完把数字 Apple ID 填进 `EXPO_ASC_APP_ID`（或写进源仓 `apps/mobile/eas.json` 的 `submit.production.ios.ascAppId`）。
 2. 在本机：`cd apps/mobile && npx eas-cli login && npx eas-cli init`，把 `expo.extra.eas.projectId` 写进 `app.json` 并提交。
 3. 配置签名：`npx eas-cli credentials -p ios`，选 production / App Store distribution。CI 只持有 `EXPO_TOKEN` 就能复用 Expo 上的证书和 profile。
 4. 推荐再在 App Store Connect → Users and Access → Integrations → App Store Connect API 建一把 **App Manager** key，把 `.p8` / Key ID / Issuer ID 放进上面三个 `EXPO_ASC_*` secret，避免 submit 阶段 2FA。
