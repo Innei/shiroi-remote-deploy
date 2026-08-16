@@ -1,0 +1,182 @@
+name: TestFlight (iOS)
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: 'Git ref in innei-dev/yohaku (branch, tag, or SHA)'
+        required: false
+        type: string
+        default: main
+      notes:
+        description: 'Optional notification notes'
+        required: false
+        type: string
+
+  repository_dispatch:
+    types: [trigger-testflight]
+
+concurrency:
+  group: testflight
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  APP_REPO_SLUG: innei-dev/yohaku
+  MOBILE_DIR: apps/mobile
+  APPLE_TEAM_ID: KAMM5N88X3
+  YOHAKU_BUNDLE_ID: in.innei
+
+jobs:
+  resolve_only:
+    name: Resolve source
+    runs-on: ubuntu-latest
+    outputs:
+      source_ref: ${{ steps.ref.outputs.source_ref }}
+      notes: ${{ steps.ref.outputs.notes }}
+    steps:
+      - name: Resolve ref and notes
+        id: ref
+        env:
+          DISPATCH_REF: ${{ github.event.client_payload.source_ref }}
+          DISPATCH_SHA: ${{ github.event.client_payload.source_sha }}
+          DISPATCH_NOTES: ${{ github.event.client_payload.notes }}
+          INPUT_REF: ${{ github.event.inputs.source_ref }}
+          INPUT_NOTES: ${{ github.event.inputs.notes }}
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+        run: |
+          if [ "${GITHUB_EVENT_NAME}" = "repository_dispatch" ]; then
+            requested="${DISPATCH_REF:-$DISPATCH_SHA}"
+            notes="$DISPATCH_NOTES"
+          else
+            requested="${INPUT_REF:-main}"
+            notes="$INPUT_NOTES"
+          fi
+          if [ -z "$requested" ]; then
+            echo "::error::No source ref provided."
+            exit 1
+          fi
+
+          source_ref=""
+          if [[ "$DISPATCH_SHA" =~ ^[0-9a-fA-F]{40}$ ]]; then
+            if [ "$requested" = "$DISPATCH_SHA" ] || [[ "$DISPATCH_SHA" == "$requested"* ]]; then
+              source_ref="$DISPATCH_SHA"
+            fi
+          fi
+          if [ -z "$source_ref" ] && [[ "$requested" =~ ^[0-9a-fA-F]{40}$ ]]; then
+            source_ref="$requested"
+          fi
+          if [ -z "$source_ref" ]; then
+            source_ref="$(gh api "repos/${APP_REPO_SLUG}/commits/${requested}" --jq .sha)"
+          fi
+          if [[ ! "$source_ref" =~ ^[0-9a-fA-F]{40}$ ]]; then
+            echo "::error::Could not resolve ${APP_REPO_SLUG}@${requested} to a full SHA."
+            exit 1
+          fi
+
+          {
+            echo "source_ref=$source_ref"
+            echo "notes<<EOF"
+            printf '%s\n' "$notes"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+          echo "Building $requested → $source_ref"
+
+  notify_x:
+    name: Notify Telegram
+    runs-on: ubuntu-latest
+    needs: [resolve_only]
+    if: ${{ always() && needs.resolve_only.result == 'success' }}
+    steps:
+      - name: Notify
+        continue-on-error: true
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          RES_SUBMIT: success
+          SOURCE_REF: ${{ needs.resolve_only.outputs.source_ref }}
+          SOURCE_SHA: x
+          SOURCE_SHORT: x
+          NOTES: ${{ needs.resolve_only.outputs.notes }}
+          APP_REPO_SLUG: ${{ env.APP_REPO_SLUG }}
+          GITHUB_REF_NAME: ${{ github.ref_name }}
+          GITHUB_ACTOR: ${{ github.actor }}
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+          GITHUB_WORKFLOW: ${{ github.workflow }}
+          GITHUB_RUN_NUMBER: ${{ github.run_number }}
+        run: |
+          if [ -z "${TELEGRAM_BOT_TOKEN:-}" ]; then
+            echo "::notice::TELEGRAM_BOT_TOKEN is not set; skipping Telegram notification."
+            exit 0
+          fi
+
+          RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          COMMIT_URL=""
+          if [ -n "${SOURCE_SHA:-}" ]; then
+            COMMIT_URL="https://github.com/${APP_REPO_SLUG}/commit/${SOURCE_SHA}"
+          fi
+          COMPLETED_AT="$(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+          export RUN_URL COMMIT_URL COMPLETED_AT
+
+          MSG="$(python3 <<'PY'
+          import html
+          import os
+
+          def esc(s: str) -> str:
+              return html.escape(s or "", quote=False)
+
+          ok = os.environ.get("RES_SUBMIT") == "success"
+          title = "✅ Yohaku TestFlight 已提交" if ok else "❌ Yohaku TestFlight 失败"
+          source_ref = esc(os.environ.get("SOURCE_REF") or "")
+          source_short = esc(os.environ.get("SOURCE_SHORT") or "")
+          source_sha = os.environ.get("SOURCE_SHA") or ""
+          notes = (os.environ.get("NOTES") or "").strip()
+          run_url = os.environ["RUN_URL"]
+          commit_url = os.environ.get("COMMIT_URL") or ""
+          completed = esc(os.environ["COMPLETED_AT"])
+          actor = esc(os.environ["GITHUB_ACTOR"])
+          event = esc(os.environ["GITHUB_EVENT_NAME"])
+          wf = esc(os.environ["GITHUB_WORKFLOW"])
+          rn = esc(os.environ["GITHUB_RUN_NUMBER"])
+          slug = esc(os.environ["APP_REPO_SLUG"])
+
+          parts = [
+              f"<b>{title}</b>",
+              f"<b>源</b>: <code>{slug}</code> @ <code>{source_ref}</code>",
+          ]
+          if source_short:
+              line = f"<code>{source_short}</code>"
+              if commit_url:
+                  line += f' · <a href="{commit_url}">打开提交</a>'
+              parts.append(f"<b>提交</b>: {line}")
+          elif source_sha:
+              parts.append(f"<b>提交</b>: <code>{esc(source_sha[:12])}</code>")
+
+          parts.extend(
+              [
+                  f"<b>触发</b>: {actor} · <code>{event}</code>",
+                  f"<b>Workflow</b>: {wf} · #{rn}",
+              ]
+          )
+          if notes:
+              preview = notes.splitlines()[0][:220]
+              parts.extend(["", f"<b>Notes</b>\n{esc(preview)}"])
+          parts.extend(
+              [
+                  "",
+                  f"<b>🕐 {completed}</b>",
+                  f'<a href="{run_url}">打开 GitHub Actions</a>',
+              ]
+          )
+          print("\n".join(parts))
+          PY
+          )"
+
+          jq -n \
+            --arg text "$MSG" \
+            '{chat_id: "@order_usagi", text: $text, parse_mode: "HTML", disable_web_page_preview: true}' \
+            | curl -sS -f -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+              -H "Content-Type: application/json" \
+              -d @-
+
