@@ -201,7 +201,15 @@ jobs:
             profile_plist="$RUNNER_TEMP/$label.plist"
 
             printf '%s' "$payload" | base64 --decode > "$profile_path"
-            security cms -D -i "$profile_path" > "$profile_plist"
+            decoded_size="$(wc -c < "$profile_path" | tr -d ' ')"
+            if [[ "$decoded_size" -lt 1000 ]]; then
+              echo "$label decoded profile is ${decoded_size} bytes; expected base64 of a .mobileprovision." >&2
+              return 1
+            fi
+            if ! security cms -D -i "$profile_path" > "$profile_plist"; then
+              echo "$label is not a valid CMS provisioning profile." >&2
+              return 1
+            fi
 
             profile_uuid="$(/usr/libexec/PlistBuddy -c 'Print :UUID' "$profile_plist")"
             profile_name="$(/usr/libexec/PlistBuddy -c 'Print :Name' "$profile_plist")"
