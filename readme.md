@@ -35,7 +35,8 @@ Dokploy 拉新 image，部署
 .github/workflows/
   deploy-main.yml      # main route
   deploy-remix.yml     # remix route
-  testflight.yml       # iOS TestFlight（EAS build + submit）
+  ship.yml             # iOS：fingerprint 相同发 OTA，否则 TestFlight
+  testflight.yml       # iOS TestFlight（也可被 ship.yml 调用）
 build_hash.main        # main route 去重指针（CI 自动维护）
 build_hash.remix       # remix route 去重指针（CI 自动维护）
 ```
@@ -74,8 +75,9 @@ build_hash.remix       # remix route 去重指针（CI 自动维护）
 |------|------------------|
 | yohaku 仓 push main           | `repository_dispatch` `trigger-main` → `deploy-main.yml` |
 | yohaku 仓 push refactor/remix | `repository_dispatch` `trigger-remix` → `deploy-remix.yml` |
-| yohaku 仓手动 TestFlight      | `repository_dispatch` `trigger-testflight` → `testflight.yml` |
-| 手动                          | `workflow_dispatch`（部署支持 `force_build`；TestFlight 支持 `source_ref` / `notes`） |
+| yohaku 仓 push mobile 相关路径 | `repository_dispatch` `trigger-ship` → `ship.yml`（OTA 或 TestFlight） |
+| yohaku 仓手动强制 IPA         | `repository_dispatch` `trigger-ship` + `force_testflight`，或 `trigger-testflight` → `testflight.yml` |
+| 手动                          | `workflow_dispatch`（部署支持 `force_build`；Ship 支持 `source_ref` / `notes` / `force_testflight`） |
 
 编排仓自身 push **不再**触发任何 build（避免改 workflow 时误触发部署）。
 
@@ -97,26 +99,31 @@ build_hash.remix       # remix route 去重指针（CI 自动维护）
 | `ASC_KEY_ID` | App Store Connect API Key ID |
 | `ASC_ISSUER_ID` | App Store Connect API Issuer ID |
 | `ASC_API_KEY_P8` | API key 的 `.p8` 原文 |
+| `OTA_SERVER` | Expo OTA Worker 根 URL（`https://ota.innei.in`） |
+| `OTA_API_KEY` | 该 app 的 upload API key |
 
-## TestFlight
+## TestFlight / OTA
 
-不用 EAS。编排仓在 `macos-26` 上 `expo prebuild` 出 native 工程（`ios/` 不进源仓），再 `xcodebuild archive` + `exportArchive` 上传 TestFlight。
+不用 EAS。`ship.yml` 先算 `@expo/fingerprint@0.20.2`，和仓库变量 `YOHAKU_IOS_FINGERPRINT` 比较：
+
+- 相同 → Ubuntu 跑 `easc update --channel production`（`Innei/expo-ota`）
+- 缺失 / 不同 / `force_testflight` → 现有 macos TestFlight；成功后写回该变量
+
+`runtimeVersion.policy` 是 `fingerprint`。旧 `1.0.0` 包只吃旧 runtime 的 OTA。
 
 ```
-yohaku 仓 Actions → Trigger Remote TestFlight
+yohaku 仓 Actions → Trigger Remote Ship
        ↓
-repository_dispatch  event_type=trigger-testflight
+repository_dispatch  event_type=trigger-ship
        ↓
-yohaku-remote-deploy  testflight.yml
+yohaku-remote-deploy  ship.yml
        ↓
-checkout innei-dev/yohaku@source_ref（含 submodule）
-       ↓
-prebuild → pod install → 导入 P12/profile → archive → upload
-       ↓
-App Store Connect → TestFlight
+fingerprint == baseline ? OTA : TestFlight
 ```
 
-不跟 `build_hash.*` 去重。`CURRENT_PROJECT_VERSION` 用 `GITHUB_RUN_NUMBER`，export 时打开 `manageAppVersionAndBuildNumber`。同一时间只跑一条。
+TestFlight 本身：`macos-26` 上 `expo prebuild`（`ios/` 不进源仓），再 `xcodebuild archive` + `exportArchive`。
+
+不跟 `build_hash.*` 去重。`CURRENT_PROJECT_VERSION` 用 `GITHUB_RUN_NUMBER`。同一时间只跑一条 TestFlight。
 
 ### 标识
 
@@ -126,12 +133,12 @@ App Store Connect → TestFlight
 | Team | `KAMM5N88X3` |
 | Profile name | `Yohaku` |
 
-源仓 `innei-dev/yohaku` 的 `.github/workflows/trigger-testflight.yml` 用现有 `secrets.PAT` 发 `repository_dispatch`。
+源仓 `innei-dev/yohaku` 的 `.github/workflows/trigger-testflight.yml`（显示名 **Trigger Remote Ship**）用现有 `secrets.PAT` 发 `repository_dispatch`。
 
 ### 触发
 
-- 源仓：Actions → **Trigger Remote TestFlight**。`ref` 留空则构建当前 run 的 SHA。
-- 编排仓：Actions → **TestFlight (iOS)**，直接填 `source_ref`。
+- 源仓：Actions → **Trigger Remote Ship**。`ref` 留空则用当前 run 的 SHA。勾 `force_testflight` 则跳过 OTA。
+- 编排仓：Actions → **Ship (OTA or TestFlight)**，或 **TestFlight (iOS)** 直接打 IPA。
 
 ## yohaku 仓 notify 配置
 

@@ -1,0 +1,332 @@
+name: Ship (OTA or TestFlight)
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: 'Git ref in innei-dev/yohaku (branch, tag, or SHA)'
+        required: false
+        type: string
+        default: main
+      notes:
+        description: 'Optional notification notes'
+        required: false
+        type: string
+      force_testflight:
+        description: 'Skip OTA and archive a TestFlight build'
+        required: false
+        type: boolean
+        default: false
+
+  repository_dispatch:
+    types: [trigger-ship]
+
+concurrency:
+  group: ship
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  actions: write
+
+env:
+  APP_REPO_SLUG: innei-dev/yohaku
+  OTA_REPO_SLUG: Innei/expo-ota
+  MOBILE_DIR: apps/mobile
+  EXPO_PUBLIC_API_URL: https://mx.innei.in/api/v3
+  EXPO_PUBLIC_PUSH_APP_ID: yohaku
+  EXPO_PUBLIC_APNS_ENV: production
+  EXPO_PUBLIC_PUSH_RELAY_URL: ${{ vars.EXPO_PUBLIC_PUSH_RELAY_URL }}
+
+jobs:
+  resolve:
+    name: Resolve source
+    runs-on: ubuntu-latest
+    outputs:
+      source_ref: ${{ steps.ref.outputs.source_ref }}
+      notes: ${{ steps.ref.outputs.notes }}
+      force_testflight: ${{ steps.ref.outputs.force_testflight }}
+    steps:
+      - name: Resolve ref and notes
+        id: ref
+        env:
+          DISPATCH_REF: ${{ github.event.client_payload.source_ref }}
+          DISPATCH_SHA: ${{ github.event.client_payload.source_sha }}
+          DISPATCH_NOTES: ${{ github.event.client_payload.notes }}
+          DISPATCH_FORCE: ${{ github.event.client_payload.force_testflight }}
+          INPUT_REF: ${{ inputs.source_ref }}
+          INPUT_NOTES: ${{ inputs.notes }}
+          INPUT_FORCE: ${{ inputs.force_testflight }}
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+        run: |
+          if [ "${GITHUB_EVENT_NAME}" = "repository_dispatch" ]; then
+            requested="${DISPATCH_REF:-$DISPATCH_SHA}"
+            notes="$DISPATCH_NOTES"
+            force="${DISPATCH_FORCE:-false}"
+          else
+            requested="${INPUT_REF:-main}"
+            notes="$INPUT_NOTES"
+            force="${INPUT_FORCE:-false}"
+          fi
+          if [ -z "$requested" ]; then
+            echo "::error::No source ref provided."
+            exit 1
+          fi
+
+          source_ref=""
+          if [[ "$DISPATCH_SHA" =~ ^[0-9a-fA-F]{40}$ ]]; then
+            if [ "$requested" = "$DISPATCH_SHA" ] || [[ "$DISPATCH_SHA" == "$requested"* ]]; then
+              source_ref="$DISPATCH_SHA"
+            fi
+          fi
+          if [ -z "$source_ref" ] && [[ "$requested" =~ ^[0-9a-fA-F]{40}$ ]]; then
+            source_ref="$requested"
+          fi
+          if [ -z "$source_ref" ]; then
+            source_ref="$(gh api "repos/${APP_REPO_SLUG}/commits/${requested}" --jq .sha)"
+          fi
+          if [[ ! "$source_ref" =~ ^[0-9a-fA-F]{40}$ ]]; then
+            echo "::error::Could not resolve ${APP_REPO_SLUG}@${requested} to a full SHA."
+            exit 1
+          fi
+
+          case "$force" in
+            true|True|TRUE|1) force=true ;;
+            *) force=false ;;
+          esac
+
+          {
+            echo "source_ref=$source_ref"
+            echo "force_testflight=$force"
+            echo "notes<<EOF"
+            printf '%s\n' "$notes"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+          echo "Shipping $requested → $source_ref force_testflight=$force"
+
+  decide:
+    name: Decide OTA or TestFlight
+    runs-on: ubuntu-latest
+    needs: resolve
+    outputs:
+      route: ${{ steps.route.outputs.route }}
+      fingerprint: ${{ steps.fp.outputs.hash }}
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ env.APP_REPO_SLUG }}
+          token: ${{ secrets.GH_PAT }}
+          ref: ${{ needs.resolve.outputs.source_ref }}
+          fetch-depth: 1
+          lfs: true
+          submodules: recursive
+
+      - name: Compute fingerprint
+        id: fp
+        working-directory: ${{ env.MOBILE_DIR }}
+        run: |
+          npx --yes @expo/fingerprint@0.20.2 . > "$RUNNER_TEMP/fp.json"
+          hash="$(jq -r .hash "$RUNNER_TEMP/fp.json")"
+          if [[ ! "$hash" =~ ^[a-zA-Z0-9]{16,}$ ]]; then
+            echo "::error::Could not compute @expo/fingerprint hash."
+            cat "$RUNNER_TEMP/fp.json" >&2
+            exit 1
+          fi
+          echo "hash=$hash" >> "$GITHUB_OUTPUT"
+          echo "Fingerprint $hash"
+
+      - name: Choose route
+        id: route
+        env:
+          FORCE: ${{ needs.resolve.outputs.force_testflight }}
+          CURRENT: ${{ steps.fp.outputs.hash }}
+          BASELINE: ${{ vars.YOHAKU_IOS_FINGERPRINT }}
+        run: |
+          if [ "$FORCE" = "true" ]; then
+            echo "route=testflight" >> "$GITHUB_OUTPUT"
+            echo "Forced TestFlight"
+            exit 0
+          fi
+          if [ -z "$BASELINE" ]; then
+            echo "route=testflight" >> "$GITHUB_OUTPUT"
+            echo "No YOHAKU_IOS_FINGERPRINT baseline; first ship is TestFlight"
+            exit 0
+          fi
+          if [ "$CURRENT" = "$BASELINE" ]; then
+            echo "route=ota" >> "$GITHUB_OUTPUT"
+            echo "Fingerprint matches baseline; shipping OTA"
+            exit 0
+          fi
+          echo "route=testflight" >> "$GITHUB_OUTPUT"
+          echo "Fingerprint changed ($BASELINE → $CURRENT); shipping TestFlight"
+
+  ota:
+    name: Publish OTA
+    runs-on: ubuntu-latest
+    needs: [resolve, decide]
+    if: ${{ needs.decide.outputs.route == 'ota' }}
+    timeout-minutes: 30
+    outputs:
+      source_sha: ${{ steps.meta.outputs.source_sha }}
+      source_short: ${{ steps.meta.outputs.source_short }}
+    steps:
+      - name: Checkout app
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ env.APP_REPO_SLUG }}
+          token: ${{ secrets.GH_PAT }}
+          ref: ${{ needs.resolve.outputs.source_ref }}
+          fetch-depth: 1
+          lfs: true
+          submodules: recursive
+          path: yohaku
+
+      - name: Checkout easc
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ env.OTA_REPO_SLUG }}
+          token: ${{ secrets.GH_PAT }}
+          path: expo-ota
+
+      - name: Record commit
+        id: meta
+        working-directory: yohaku
+        run: |
+          echo "source_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "source_short=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+
+      - uses: pnpm/action-setup@v6
+        with:
+          package_json_file: yohaku/package.json
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+
+      - uses: oven-sh/setup-bun@v2
+
+      - name: Install app dependencies
+        working-directory: yohaku
+        run: pnpm install --frozen-lockfile --filter @yohaku/mobile...
+
+      - name: Install easc dependencies
+        working-directory: expo-ota
+        run: bun install --frozen-lockfile
+
+      - name: Publish update
+        working-directory: yohaku/${{ env.MOBILE_DIR }}
+        env:
+          OTA_SERVER: ${{ secrets.OTA_SERVER }}
+          OTA_API_KEY: ${{ secrets.OTA_API_KEY }}
+        run: |
+          : "${OTA_SERVER:?OTA_SERVER is required}"
+          : "${OTA_API_KEY:?OTA_API_KEY is required}"
+          node "$GITHUB_WORKSPACE/expo-ota/apps/easc/bin/easc.js" update \
+            --channel production \
+            --non-interactive
+
+  testflight:
+    name: TestFlight
+    needs: [resolve, decide]
+    if: ${{ needs.decide.outputs.route == 'testflight' }}
+    uses: ./.github/workflows/testflight.yml
+    with:
+      source_ref: ${{ needs.resolve.outputs.source_ref }}
+      notes: ${{ needs.resolve.outputs.notes }}
+    secrets: inherit
+
+  notify:
+    name: Notify Telegram
+    runs-on: ubuntu-latest
+    needs: [resolve, decide, ota]
+    if: ${{ always() && needs.resolve.result == 'success' && needs.decide.outputs.route == 'ota' }}
+    steps:
+      - name: Notify
+        continue-on-error: true
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          RES_OTA: ${{ needs.ota.result }}
+          SOURCE_REF: ${{ needs.resolve.outputs.source_ref }}
+          SOURCE_SHA: ${{ needs.ota.outputs.source_sha }}
+          SOURCE_SHORT: ${{ needs.ota.outputs.source_short }}
+          FINGERPRINT: ${{ needs.decide.outputs.fingerprint }}
+          NOTES: ${{ needs.resolve.outputs.notes }}
+          APP_REPO_SLUG: ${{ env.APP_REPO_SLUG }}
+          GITHUB_ACTOR: ${{ github.actor }}
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+          GITHUB_WORKFLOW: ${{ github.workflow }}
+          GITHUB_RUN_NUMBER: ${{ github.run_number }}
+        run: |
+          if [ -z "${TELEGRAM_BOT_TOKEN:-}" ]; then
+            echo "::notice::TELEGRAM_BOT_TOKEN is not set; skipping Telegram notification."
+            exit 0
+          fi
+
+          RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          COMMIT_URL=""
+          if [ -n "${SOURCE_SHA:-}" ]; then
+            COMMIT_URL="https://github.com/${APP_REPO_SLUG}/commit/${SOURCE_SHA}"
+          fi
+          COMPLETED_AT="$(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+          export RUN_URL COMMIT_URL COMPLETED_AT
+
+          MSG="$(python3 <<'PY'
+          import html
+          import os
+
+          def esc(s: str) -> str:
+              return html.escape(s or "", quote=False)
+
+          ok = os.environ.get("RES_OTA") == "success"
+          title = "✅ Yohaku OTA 已发布" if ok else "❌ Yohaku OTA 失败"
+          source_ref = esc(os.environ.get("SOURCE_REF") or "")
+          source_short = esc(os.environ.get("SOURCE_SHORT") or "")
+          notes = (os.environ.get("NOTES") or "").strip()
+          fingerprint = esc(os.environ.get("FINGERPRINT") or "")
+          run_url = os.environ["RUN_URL"]
+          commit_url = os.environ.get("COMMIT_URL") or ""
+          completed = esc(os.environ["COMPLETED_AT"])
+          actor = esc(os.environ["GITHUB_ACTOR"])
+          event = esc(os.environ["GITHUB_EVENT_NAME"])
+          wf = esc(os.environ["GITHUB_WORKFLOW"])
+          rn = esc(os.environ["GITHUB_RUN_NUMBER"])
+          slug = esc(os.environ["APP_REPO_SLUG"])
+
+          parts = [
+              f"<b>{title}</b>",
+              f"<b>源</b>: <code>{slug}</code> @ <code>{source_ref}</code>",
+          ]
+          if source_short:
+              line = f"<code>{source_short}</code>"
+              if commit_url:
+                  line += f' · <a href="{commit_url}">打开提交</a>'
+              parts.append(f"<b>提交</b>: {line}")
+          if fingerprint:
+              parts.append(f"<b>Fingerprint</b>: <code>{fingerprint}</code>")
+          parts.extend(
+              [
+                  f"<b>触发</b>: {actor} · <code>{event}</code>",
+                  f"<b>Workflow</b>: {wf} · #{rn}",
+              ]
+          )
+          if notes:
+              preview = notes.splitlines()[0][:220]
+              parts.extend(["", f"<b>Notes</b>\n{esc(preview)}"])
+          parts.extend(
+              [
+                  "",
+                  f"<b>🕐 {completed}</b>",
+                  f'<a href="{run_url}">打开 GitHub Actions</a>',
+              ]
+          )
+          print("\n".join(parts))
+          PY
+          )"
+
+          jq -n \
+            --arg text "$MSG" \
+            '{chat_id: "@order_usagi", text: $text, parse_mode: "HTML", disable_web_page_preview: true}' \
+            | curl -sS -f -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+              -H "Content-Type: application/json" \
+              -d @-

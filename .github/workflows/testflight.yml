@@ -1,6 +1,18 @@
 name: TestFlight (iOS)
 
 on:
+  workflow_call:
+    inputs:
+      source_ref:
+        description: 'Resolved SHA in innei-dev/yohaku'
+        required: true
+        type: string
+      notes:
+        description: 'Optional notification notes'
+        required: false
+        type: string
+        default: ''
+
   workflow_dispatch:
     inputs:
       source_ref:
@@ -22,6 +34,7 @@ concurrency:
 
 permissions:
   contents: read
+  actions: write
 
 env:
   APP_REPO_SLUG: innei-dev/yohaku
@@ -50,8 +63,8 @@ jobs:
           DISPATCH_REF: ${{ github.event.client_payload.source_ref }}
           DISPATCH_SHA: ${{ github.event.client_payload.source_sha }}
           DISPATCH_NOTES: ${{ github.event.client_payload.notes }}
-          INPUT_REF: ${{ github.event.inputs.source_ref }}
-          INPUT_NOTES: ${{ github.event.inputs.notes }}
+          INPUT_REF: ${{ inputs.source_ref }}
+          INPUT_NOTES: ${{ inputs.notes }}
           GH_TOKEN: ${{ secrets.GH_PAT }}
         run: |
           if [ "${GITHUB_EVENT_NAME}" = "repository_dispatch" ]; then
@@ -398,6 +411,51 @@ jobs:
               rm -f "$HOME/Library/Developer/Xcode/UserData/Provisioning Profiles/$uuid.mobileprovision"
             fi
           done
+
+  record-baseline:
+    name: Record iOS fingerprint baseline
+    runs-on: ubuntu-latest
+    needs: [resolve, submit]
+    if: ${{ needs.submit.result == 'success' }}
+    permissions:
+      contents: read
+      actions: write
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ env.APP_REPO_SLUG }}
+          token: ${{ secrets.GH_PAT }}
+          ref: ${{ needs.resolve.outputs.source_ref }}
+          fetch-depth: 1
+          lfs: true
+          submodules: recursive
+
+      - name: Compute fingerprint
+        id: fp
+        working-directory: ${{ env.MOBILE_DIR }}
+        run: |
+          npx --yes @expo/fingerprint@0.20.2 . > "$RUNNER_TEMP/fp.json"
+          hash="$(jq -r .hash "$RUNNER_TEMP/fp.json")"
+          if [[ ! "$hash" =~ ^[a-zA-Z0-9]{16,}$ ]]; then
+            echo "::error::Could not compute @expo/fingerprint hash."
+            cat "$RUNNER_TEMP/fp.json" >&2
+            exit 1
+          fi
+          echo "hash=$hash" >> "$GITHUB_OUTPUT"
+          echo "Fingerprint $hash"
+
+      - name: Store YOHAKU_IOS_FINGERPRINT
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HASH: ${{ steps.fp.outputs.hash }}
+        run: |
+          if gh api "repos/${GITHUB_REPOSITORY}/actions/variables/YOHAKU_IOS_FINGERPRINT" >/dev/null 2>&1; then
+            gh api --method PATCH "repos/${GITHUB_REPOSITORY}/actions/variables/YOHAKU_IOS_FINGERPRINT" -f value="$HASH"
+          else
+            gh api --method POST "repos/${GITHUB_REPOSITORY}/actions/variables" -f name=YOHAKU_IOS_FINGERPRINT -f value="$HASH"
+          fi
+          echo "Recorded YOHAKU_IOS_FINGERPRINT=$HASH"
 
   notify:
     name: Notify Telegram
