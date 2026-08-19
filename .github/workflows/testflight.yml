@@ -405,7 +405,17 @@ jobs:
 
           expo_plist="$APP/Expo.plist"
           test -f "$expo_plist"
-          runtime_version="$(/usr/libexec/PlistBuddy -c 'Print :EXUpdatesRuntimeVersion' "$expo_plist")"
+          runtime_config="$(/usr/libexec/PlistBuddy -c 'Print :EXUpdatesRuntimeVersion' "$expo_plist")"
+          if [ "$runtime_config" = 'file:fingerprint' ]; then
+            fingerprint_file="$APP/EXUpdates.bundle/fingerprint"
+            if [ ! -f "$fingerprint_file" ]; then
+              echo "Archive uses the fingerprint runtime policy but $fingerprint_file is missing." >&2
+              exit 1
+            fi
+            runtime_version="$(tr -d '\r\n' < "$fingerprint_file")"
+          else
+            runtime_version="$runtime_config"
+          fi
           if [ "$runtime_version" != "$EXPO_UPDATES_FINGERPRINT_OVERRIDE" ]; then
             echo "Archive runtime $runtime_version does not match fingerprint $EXPO_UPDATES_FINGERPRINT_OVERRIDE." >&2
             exit 1
@@ -415,7 +425,7 @@ jobs:
           codesign -d --entitlements :- --xml "$APP" > "$entitlements" 2>/dev/null
           test "$(/usr/libexec/PlistBuddy -c 'Print :aps-environment' "$entitlements")" = 'production'
           test "$(/usr/libexec/PlistBuddy -c 'Print :com.apple.developer.usernotifications.communication' "$entitlements")" = 'true'
-          echo "Archive contains $appex_ident signed alongside $ident at build $build_number runtime $runtime_version"
+          echo "Archive contains $appex_ident signed alongside $ident at build $build_number runtime $runtime_version ($runtime_config)"
 
       - name: Prepare App Store Connect authentication
         env:
