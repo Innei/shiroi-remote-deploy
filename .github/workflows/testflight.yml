@@ -185,22 +185,6 @@ jobs:
           echo "source_short=$source_short" >> "$GITHUB_OUTPUT"
           echo "Resolved ${{ env.APP_REPO_SLUG }}@$source_short"
 
-      - name: Resolve monotonic build number
-        run: |
-          set -euo pipefail
-          # GitHub run numbers are scoped to a workflow, so Ship and direct
-          # TestFlight runs can otherwise reuse the same App Store build.
-          epoch_day=$(( ($(date -u +%s) - 1577836800) / 86400 ))
-          utc_hour=$((10#$(date -u +%H)))
-          utc_minute=$((10#$(date -u +%M)))
-          if (( epoch_day < 1 || epoch_day > 9999 || utc_hour > 23 || utc_minute > 59 )); then
-            echo "Could not derive a valid CFBundleVersion from the UTC clock." >&2
-            exit 1
-          fi
-          build_number="$epoch_day.$utc_hour.$utc_minute"
-          echo "BUILD_NUMBER=$build_number" >> "$GITHUB_ENV"
-          echo "Resolved App Store build $build_number"
-
       - uses: maxim-lobanov/setup-xcode@v1
         with:
           xcode-version: latest-stable
@@ -215,6 +199,52 @@ jobs:
 
       - name: Install JS dependencies
         run: pnpm install --frozen-lockfile --filter @yohaku/mobile...
+
+      - name: Reserve App Store build number
+        working-directory: ${{ env.MOBILE_DIR }}
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+        run: |
+          set -euo pipefail
+          marketing_version="$(./node_modules/.bin/expo config --json | jq -r '.version // empty')"
+          if [[ ! "$marketing_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Expo config produced invalid marketing version: $marketing_version" >&2
+            exit 1
+          fi
+
+          build_cursor="$(gh variable get YOHAKU_IOS_BUILD_CURSOR \
+            --repo "$GITHUB_REPOSITORY" \
+            --json value \
+            --jq .value 2>/dev/null || true)"
+          last_build=0
+          if [ -n "$build_cursor" ]; then
+            if [[ ! "$build_cursor" =~ ^([^:]+):([0-9]+)$ ]]; then
+              echo "YOHAKU_IOS_BUILD_CURSOR has invalid value: $build_cursor" >&2
+              exit 1
+            fi
+            cursor_version="${BASH_REMATCH[1]}"
+            cursor_build="${BASH_REMATCH[2]}"
+            if [ "$cursor_version" = "$marketing_version" ]; then
+              last_build="$cursor_build"
+            fi
+          fi
+
+          build_number=$((last_build + 1))
+          if (( build_number < 1 || build_number > 9999 )); then
+            echo "Could not reserve a valid CFBundleVersion for $marketing_version." >&2
+            exit 1
+          fi
+
+          # The testflight concurrency group serializes every direct and Ship
+          # entry point. Reserve before archiving; failed builds consume a number.
+          gh variable set YOHAKU_IOS_BUILD_CURSOR \
+            --repo "$GITHUB_REPOSITORY" \
+            --body "$marketing_version:$build_number"
+          {
+            echo "MARKETING_VERSION=$marketing_version"
+            echo "BUILD_NUMBER=$build_number"
+          } >> "$GITHUB_ENV"
+          echo "Reserved App Store build $marketing_version ($build_number)"
 
       - name: Generate native iOS project
         working-directory: ${{ env.MOBILE_DIR }}
@@ -388,7 +418,7 @@ jobs:
             -archivePath "$RUNNER_TEMP/Yohaku.xcarchive" \
             archive \
             CURRENT_PROJECT_VERSION="$BUILD_NUMBER" \
-            MARKETING_VERSION=1.0.0 \
+            MARKETING_VERSION="$MARKETING_VERSION" \
             | xcbeautify --renderer github-actions
 
       - name: Verify archive
@@ -403,6 +433,11 @@ jobs:
             echo "Main app build number $build_number does not match resolved build $BUILD_NUMBER." >&2
             exit 1
           fi
+          marketing_version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP/Info.plist")"
+          if [ "$marketing_version" != "$MARKETING_VERSION" ]; then
+            echo "Main app version $marketing_version does not match resolved version $MARKETING_VERSION." >&2
+            exit 1
+          fi
 
           appex="$(find "$APP/PlugIns" -maxdepth 1 -name '*.appex' -print -quit 2>/dev/null || true)"
           if [ -z "$appex" ]; then
@@ -414,6 +449,11 @@ jobs:
           appex_build_number="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$appex/Info.plist")"
           if [ "$appex_build_number" != "$BUILD_NUMBER" ]; then
             echo "Notification extension build number $appex_build_number does not match resolved build $BUILD_NUMBER." >&2
+            exit 1
+          fi
+          appex_marketing_version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$appex/Info.plist")"
+          if [ "$appex_marketing_version" != "$MARKETING_VERSION" ]; then
+            echo "Notification extension version $appex_marketing_version does not match resolved version $MARKETING_VERSION." >&2
             exit 1
           fi
           extension_point="$(/usr/libexec/PlistBuddy -c 'Print :NSExtension:NSExtensionPointIdentifier' "$appex/Info.plist")"
@@ -441,7 +481,7 @@ jobs:
           codesign -d --entitlements :- --xml "$APP" > "$entitlements" 2>/dev/null
           test "$(/usr/libexec/PlistBuddy -c 'Print :aps-environment' "$entitlements")" = 'production'
           test "$(/usr/libexec/PlistBuddy -c 'Print :com.apple.developer.usernotifications.communication' "$entitlements")" = 'true'
-          echo "Archive contains $appex_ident signed alongside $ident at build $build_number runtime $runtime_version ($runtime_config)"
+          echo "Archive contains $appex_ident signed alongside $ident at version $marketing_version build $build_number runtime $runtime_version ($runtime_config)"
 
       - name: Prepare App Store Connect authentication
         env:
