@@ -138,6 +138,19 @@ jobs:
         working-directory: ${{ env.MOBILE_DIR }}
         run: npx expo prebuild --platform ios --non-interactive --no-install
 
+      - name: Stamp CI build number
+        working-directory: ${{ env.MOBILE_DIR }}
+        run: |
+          set -euo pipefail
+          info_plist="ios/Yohaku/Info.plist"
+          test -f "$info_plist"
+          /usr/libexec/PlistBuddy \
+            -c "Set :CFBundleVersion $GITHUB_RUN_NUMBER" \
+            "$info_plist"
+          stamped="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$info_plist")"
+          test "$stamped" = "$GITHUB_RUN_NUMBER"
+          echo "Stamped main app source plist at build $stamped"
+
       - name: Install CocoaPods
         working-directory: ${{ env.MOBILE_DIR }}/ios
         run: |
