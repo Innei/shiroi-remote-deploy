@@ -12,6 +12,11 @@ on:
         required: false
         type: string
         default: ''
+      runtime_fingerprint:
+        description: 'Resolved iOS fingerprint from the ship workflow'
+        required: false
+        type: string
+        default: ''
 
   workflow_dispatch:
     inputs:
@@ -81,9 +86,7 @@ jobs:
 
           source_ref=""
           if [[ "$DISPATCH_SHA" =~ ^[0-9a-fA-F]{40}$ ]]; then
-            if [ "$requested" = "$DISPATCH_SHA" ] || [[ "$DISPATCH_SHA" == "$requested"* ]]; then
-              source_ref="$DISPATCH_SHA"
-            fi
+            source_ref="$DISPATCH_SHA"
           fi
           if [ -z "$source_ref" ] && [[ "$requested" =~ ^[0-9a-fA-F]{40}$ ]]; then
             source_ref="$requested"
@@ -104,14 +107,64 @@ jobs:
           } >> "$GITHUB_OUTPUT"
           echo "Building $requested → $source_ref"
 
+  fingerprint:
+    name: Resolve iOS runtime fingerprint
+    runs-on: ubuntu-latest
+    needs: resolve
+    outputs:
+      hash: ${{ steps.fp.outputs.hash }}
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ env.APP_REPO_SLUG }}
+          token: ${{ secrets.GH_PAT }}
+          ref: ${{ needs.resolve.outputs.source_ref }}
+          fetch-depth: 1
+          lfs: true
+          submodules: recursive
+
+      - uses: pnpm/action-setup@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+
+      - name: Install JS dependencies
+        run: pnpm install --frozen-lockfile --filter @yohaku/mobile...
+
+      - name: Compute and verify fingerprint
+        id: fp
+        working-directory: ${{ env.MOBILE_DIR }}
+        env:
+          EXPECTED: ${{ inputs.runtime_fingerprint }}
+        run: |
+          ./node_modules/.bin/fingerprint fingerprint:generate \
+            --platform ios \
+            > "$RUNNER_TEMP/fp.json"
+          hash="$(jq -r .hash "$RUNNER_TEMP/fp.json")"
+          if [[ ! "$hash" =~ ^[a-zA-Z0-9]{16,}$ ]]; then
+            echo "::error::Could not compute iOS fingerprint."
+            cat "$RUNNER_TEMP/fp.json" >&2
+            exit 1
+          fi
+          if [ -n "$EXPECTED" ] && [ "$hash" != "$EXPECTED" ]; then
+            echo "::error::Ship fingerprint $EXPECTED does not match TestFlight fingerprint $hash."
+            exit 1
+          fi
+          echo "hash=$hash" >> "$GITHUB_OUTPUT"
+          echo "iOS runtime fingerprint $hash"
+
   submit:
     name: Archive and upload
     runs-on: macos-26
-    needs: resolve
+    needs: [resolve, fingerprint]
     timeout-minutes: 120
     outputs:
       source_sha: ${{ steps.meta.outputs.source_sha }}
       source_short: ${{ steps.meta.outputs.source_short }}
+    env:
+      EXPO_UPDATES_FINGERPRINT_OVERRIDE: ${{ needs.fingerprint.outputs.hash }}
     steps:
       - name: Checkout source
         uses: actions/checkout@v6
@@ -350,11 +403,19 @@ jobs:
           extension_point="$(/usr/libexec/PlistBuddy -c 'Print :NSExtension:NSExtensionPointIdentifier' "$appex/Info.plist")"
           test "$extension_point" = 'com.apple.usernotifications.service'
 
+          expo_plist="$APP/Expo.plist"
+          test -f "$expo_plist"
+          runtime_version="$(/usr/libexec/PlistBuddy -c 'Print :EXUpdatesRuntimeVersion' "$expo_plist")"
+          if [ "$runtime_version" != "$EXPO_UPDATES_FINGERPRINT_OVERRIDE" ]; then
+            echo "Archive runtime $runtime_version does not match fingerprint $EXPO_UPDATES_FINGERPRINT_OVERRIDE." >&2
+            exit 1
+          fi
+
           entitlements="$RUNNER_TEMP/app-entitlements.plist"
           codesign -d --entitlements :- --xml "$APP" > "$entitlements" 2>/dev/null
           test "$(/usr/libexec/PlistBuddy -c 'Print :aps-environment' "$entitlements")" = 'production'
           test "$(/usr/libexec/PlistBuddy -c 'Print :com.apple.developer.usernotifications.communication' "$entitlements")" = 'true'
-          echo "Archive contains $appex_ident signed alongside $ident at build $build_number"
+          echo "Archive contains $appex_ident signed alongside $ident at build $build_number runtime $runtime_version"
 
       - name: Prepare App Store Connect authentication
         env:
@@ -415,40 +476,16 @@ jobs:
   record-baseline:
     name: Record iOS fingerprint baseline
     runs-on: ubuntu-latest
-    needs: [resolve, submit]
+    needs: [fingerprint, submit]
     if: ${{ needs.submit.result == 'success' }}
     permissions:
       contents: read
       actions: write
     steps:
-      - name: Checkout source
-        uses: actions/checkout@v6
-        with:
-          repository: ${{ env.APP_REPO_SLUG }}
-          token: ${{ secrets.GH_PAT }}
-          ref: ${{ needs.resolve.outputs.source_ref }}
-          fetch-depth: 1
-          lfs: true
-          submodules: recursive
-
-      - name: Compute fingerprint
-        id: fp
-        working-directory: ${{ env.MOBILE_DIR }}
-        run: |
-          npx --yes @expo/fingerprint@0.20.2 . > "$RUNNER_TEMP/fp.json"
-          hash="$(jq -r .hash "$RUNNER_TEMP/fp.json")"
-          if [[ ! "$hash" =~ ^[a-zA-Z0-9]{16,}$ ]]; then
-            echo "::error::Could not compute @expo/fingerprint hash."
-            cat "$RUNNER_TEMP/fp.json" >&2
-            exit 1
-          fi
-          echo "hash=$hash" >> "$GITHUB_OUTPUT"
-          echo "Fingerprint $hash"
-
       - name: Store YOHAKU_IOS_FINGERPRINT
         env:
-          GH_TOKEN: ${{ github.token }}
-          HASH: ${{ steps.fp.outputs.hash }}
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+          HASH: ${{ needs.fingerprint.outputs.hash }}
         run: |
           if gh api "repos/${GITHUB_REPOSITORY}/actions/variables/YOHAKU_IOS_FINGERPRINT" >/dev/null 2>&1; then
             gh api --method PATCH "repos/${GITHUB_REPOSITORY}/actions/variables/YOHAKU_IOS_FINGERPRINT" -f value="$HASH"

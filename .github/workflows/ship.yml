@@ -75,9 +75,7 @@ jobs:
 
           source_ref=""
           if [[ "$DISPATCH_SHA" =~ ^[0-9a-fA-F]{40}$ ]]; then
-            if [ "$requested" = "$DISPATCH_SHA" ] || [[ "$DISPATCH_SHA" == "$requested"* ]]; then
-              source_ref="$DISPATCH_SHA"
-            fi
+            source_ref="$DISPATCH_SHA"
           fi
           if [ -z "$source_ref" ] && [[ "$requested" =~ ^[0-9a-fA-F]{40}$ ]]; then
             source_ref="$requested"
@@ -122,11 +120,22 @@ jobs:
           lfs: true
           submodules: recursive
 
+      - uses: pnpm/action-setup@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+
+      - name: Install JS dependencies
+        run: pnpm install --frozen-lockfile --filter @yohaku/mobile...
+
       - name: Compute fingerprint
         id: fp
         working-directory: ${{ env.MOBILE_DIR }}
         run: |
-          npx --yes @expo/fingerprint@0.20.2 . > "$RUNNER_TEMP/fp.json"
+          ./node_modules/.bin/fingerprint fingerprint:generate \
+            --platform ios \
+            > "$RUNNER_TEMP/fp.json"
           hash="$(jq -r .hash "$RUNNER_TEMP/fp.json")"
           if [[ ! "$hash" =~ ^[a-zA-Z0-9]{16,}$ ]]; then
             echo "::error::Could not compute @expo/fingerprint hash."
@@ -219,6 +228,8 @@ jobs:
         env:
           OTA_SERVER: ${{ secrets.OTA_SERVER }}
           OTA_API_KEY: ${{ secrets.OTA_API_KEY }}
+          EXPO_UPDATES_FINGERPRINT_OVERRIDE: ${{ needs.decide.outputs.fingerprint }}
+          EASC_SOURCE_COMMIT: ${{ needs.resolve.outputs.source_ref }}
         run: |
           : "${OTA_SERVER:?OTA_SERVER is required}"
           : "${OTA_API_KEY:?OTA_API_KEY is required}"
@@ -234,6 +245,7 @@ jobs:
     with:
       source_ref: ${{ needs.resolve.outputs.source_ref }}
       notes: ${{ needs.resolve.outputs.notes }}
+      runtime_fingerprint: ${{ needs.decide.outputs.fingerprint }}
     secrets: inherit
 
   notify:
