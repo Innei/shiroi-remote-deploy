@@ -303,6 +303,11 @@ jobs:
           test -d "$APP"
           ident="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$APP/Info.plist")"
           test "$ident" = "$YOHAKU_BUNDLE_ID"
+          build_number="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP/Info.plist")"
+          if [ "$build_number" != "$GITHUB_RUN_NUMBER" ]; then
+            echo "Main app build number $build_number does not match GitHub run number $GITHUB_RUN_NUMBER." >&2
+            exit 1
+          fi
 
           appex="$(find "$APP/PlugIns" -maxdepth 1 -name '*.appex' -print -quit 2>/dev/null || true)"
           if [ -z "$appex" ]; then
@@ -311,6 +316,11 @@ jobs:
           fi
           appex_ident="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$appex/Info.plist")"
           test "$appex_ident" = "$YOHAKU_EXTENSION_BUNDLE_ID"
+          appex_build_number="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$appex/Info.plist")"
+          if [ "$appex_build_number" != "$GITHUB_RUN_NUMBER" ]; then
+            echo "Notification extension build number $appex_build_number does not match GitHub run number $GITHUB_RUN_NUMBER." >&2
+            exit 1
+          fi
           extension_point="$(/usr/libexec/PlistBuddy -c 'Print :NSExtension:NSExtensionPointIdentifier' "$appex/Info.plist")"
           test "$extension_point" = 'com.apple.usernotifications.service'
 
@@ -318,7 +328,7 @@ jobs:
           codesign -d --entitlements :- --xml "$APP" > "$entitlements" 2>/dev/null
           test "$(/usr/libexec/PlistBuddy -c 'Print :aps-environment' "$entitlements")" = 'production'
           test "$(/usr/libexec/PlistBuddy -c 'Print :com.apple.developer.usernotifications.communication' "$entitlements")" = 'true'
-          echo "Archive contains $appex_ident signed alongside $ident"
+          echo "Archive contains $appex_ident signed alongside $ident at build $build_number"
 
       - name: Prepare App Store Connect authentication
         env:
@@ -351,7 +361,7 @@ jobs:
               <key>$YOHAKU_BUNDLE_ID</key><string>$IOS_APP_PROFILE_NAME</string>
               <key>$YOHAKU_EXTENSION_BUNDLE_ID</key><string>$IOS_EXTENSION_PROFILE_NAME</string>
             </dict>
-            <key>manageAppVersionAndBuildNumber</key><true/>
+            <key>manageAppVersionAndBuildNumber</key><false/>
           </dict>
           </plist>
           EOF
