@@ -111,6 +111,11 @@ build_hash.remix       # remix route 去重指针（CI 自动维护）
 
 `runtimeVersion.policy` 是 `fingerprint`。旧 `1.0.0` 包只吃旧 runtime 的 OTA。
 
+TestFlight build 使用仓库变量 `YOHAKU_IOS_BUILD_CURSOR`，格式为
+`<marketing-version>:<last-reserved-build>`。同一版本按整数递增；Expo
+marketing version 变化时从 `1` 重新开始。号码在 archive 前预留，失败构建
+也不会回收，避免重试复用 Apple 已接收的 build。
+
 ```
 yohaku 仓 Actions → Trigger Remote Ship
        ↓
