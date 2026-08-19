@@ -195,9 +195,7 @@ jobs:
         uses: actions/checkout@v6
         with:
           repository: ${{ env.OTA_REPO_SLUG }}
-          # GH_PAT is scoped to the private application repository. The OTA
-          # publisher lives under a separate owner and requires the shared PAT.
-          token: ${{ secrets.PAT }}
+          ssh-key: ${{ secrets.EXPO_OTA_DEPLOY_KEY }}
           path: expo-ota
 
       - name: Record commit
