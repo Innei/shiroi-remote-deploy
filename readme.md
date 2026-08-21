@@ -107,7 +107,8 @@ build_hash.remix       # remix route 去重指针（CI 自动维护）
 不用 EAS。`ship.yml` 先算 `@expo/fingerprint@0.20.2`，和仓库变量 `YOHAKU_IOS_FINGERPRINT` 比较：
 
 - 相同 → Ubuntu 跑 `easc update --channel production`（`Innei/expo-ota`）
-- 缺失 / 不同 / `force_testflight` → 现有 macos TestFlight；成功后写回该变量
+- 缺失 / 不同 / `force_testflight` → 现有 macos TestFlight；上传后等待 App Store Connect
+  确认目标构建达到 `VALID` / `IN_BETA_TESTING`，再写回该变量
 
 `runtimeVersion.policy` 是 `fingerprint`。旧 `1.0.0` 包只吃旧 runtime 的 OTA。
 
@@ -126,9 +127,9 @@ yohaku-remote-deploy  ship.yml
 fingerprint == baseline ? OTA : TestFlight
 ```
 
-TestFlight 本身：`macos-26` 上 `expo prebuild`（`ios/` 不进源仓），再 `xcodebuild archive` + `exportArchive`。
+TestFlight 本身：`macos-26` 上 `expo prebuild`（`ios/` 不进源仓），再 `xcodebuild archive` + `exportArchive`。上传后最多等待 45 分钟；Apple 处理失败或超时均不会更新 OTA runtime 基线。
 
-不跟 `build_hash.*` 去重。`CURRENT_PROJECT_VERSION` 用 `GITHUB_RUN_NUMBER`。同一时间只跑一条 TestFlight。
+不跟 `build_hash.*` 去重。`CURRENT_PROJECT_VERSION` 使用预留的 build cursor。同一时间只跑一条 TestFlight。
 
 ### 标识
 

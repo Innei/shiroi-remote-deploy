@@ -161,6 +161,8 @@ jobs:
     needs: [resolve, fingerprint]
     timeout-minutes: 120
     outputs:
+      build_number: ${{ steps.build.outputs.build_number }}
+      marketing_version: ${{ steps.build.outputs.marketing_version }}
       source_sha: ${{ steps.meta.outputs.source_sha }}
       source_short: ${{ steps.meta.outputs.source_short }}
     env:
@@ -201,6 +203,7 @@ jobs:
         run: pnpm install --frozen-lockfile --filter @yohaku/mobile...
 
       - name: Reserve App Store build number
+        id: build
         working-directory: ${{ env.MOBILE_DIR }}
         env:
           GH_TOKEN: ${{ secrets.GH_PAT }}
@@ -244,6 +247,10 @@ jobs:
             echo "MARKETING_VERSION=$marketing_version"
             echo "BUILD_NUMBER=$build_number"
           } >> "$GITHUB_ENV"
+          {
+            echo "marketing_version=$marketing_version"
+            echo "build_number=$build_number"
+          } >> "$GITHUB_OUTPUT"
           echo "Reserved App Store build $marketing_version ($build_number)"
 
       - name: Generate native iOS project
@@ -539,11 +546,35 @@ jobs:
             fi
           done
 
+  app-store:
+    name: Confirm TestFlight availability
+    runs-on: ubuntu-latest
+    needs: submit
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+
+      - name: Wait for Apple processing and internal beta availability
+        env:
+          APP_BUNDLE_ID: ${{ env.YOHAKU_BUNDLE_ID }}
+          ASC_API_KEY_P8: ${{ secrets.ASC_API_KEY_P8 }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_POLL_INTERVAL_SECONDS: 30
+          ASC_WAIT_TIMEOUT_SECONDS: 2700
+          BUILD_NUMBER: ${{ needs.submit.outputs.build_number }}
+          MARKETING_VERSION: ${{ needs.submit.outputs.marketing_version }}
+        run: node .github/scripts/wait-for-app-store-build.mjs
+
   record-baseline:
     name: Record iOS fingerprint baseline
     runs-on: ubuntu-latest
-    needs: [fingerprint, submit]
-    if: ${{ needs.submit.result == 'success' }}
+    needs: [fingerprint, submit, app-store]
+    if: ${{ needs.app-store.result == 'success' }}
     permissions:
       contents: read
       actions: write
@@ -563,7 +594,7 @@ jobs:
   notify:
     name: Notify Telegram
     runs-on: ubuntu-latest
-    needs: [resolve, submit]
+    needs: [resolve, submit, app-store]
     if: ${{ always() && needs.resolve.result == 'success' }}
     steps:
       - name: Notify
@@ -571,6 +602,7 @@ jobs:
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           RES_SUBMIT: ${{ needs.submit.result }}
+          RES_APP_STORE: ${{ needs.app-store.result }}
           SOURCE_REF: ${{ needs.resolve.outputs.source_ref }}
           SOURCE_SHA: ${{ needs.submit.outputs.source_sha }}
           SOURCE_SHORT: ${{ needs.submit.outputs.source_short }}
@@ -602,8 +634,14 @@ jobs:
           def esc(s: str) -> str:
               return html.escape(s or "", quote=False)
 
-          ok = os.environ.get("RES_SUBMIT") == "success"
-          title = "✅ Yohaku TestFlight 已提交" if ok else "❌ Yohaku TestFlight 失败"
+          submit_ok = os.environ.get("RES_SUBMIT") == "success"
+          app_store_ok = os.environ.get("RES_APP_STORE") == "success"
+          if not submit_ok:
+              title = "❌ Yohaku TestFlight 上传失败"
+          elif app_store_ok:
+              title = "✅ Yohaku TestFlight 已可测试"
+          else:
+              title = "❌ Yohaku TestFlight 处理确认失败"
           source_ref = esc(os.environ.get("SOURCE_REF") or "")
           source_short = esc(os.environ.get("SOURCE_SHORT") or "")
           source_sha = os.environ.get("SOURCE_SHA") or ""
@@ -631,6 +669,7 @@ jobs:
 
           parts.extend(
               [
+                  f"<b>App Store Connect</b>: <code>{esc(os.environ.get('RES_APP_STORE') or '')}</code>",
                   f"<b>触发</b>: {actor} · <code>{event}</code>",
                   f"<b>Workflow</b>: {wf} · #{rn}",
               ]
