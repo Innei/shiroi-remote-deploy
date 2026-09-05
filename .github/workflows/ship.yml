@@ -111,7 +111,7 @@ jobs:
       fingerprint: ${{ steps.fp.outputs.hash }}
     steps:
       - name: Checkout source
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           repository: ${{ env.APP_REPO_SLUG }}
           token: ${{ secrets.GH_PAT }}
@@ -181,7 +181,7 @@ jobs:
       source_short: ${{ steps.meta.outputs.source_short }}
     steps:
       - name: Checkout app
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           repository: ${{ env.APP_REPO_SLUG }}
           token: ${{ secrets.GH_PAT }}
@@ -192,7 +192,7 @@ jobs:
           path: yohaku
 
       - name: Checkout easc
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           repository: ${{ env.OTA_REPO_SLUG }}
           ssh-key: ${{ secrets.EXPO_OTA_DEPLOY_KEY }}
